@@ -17,13 +17,13 @@ type Config struct {
 	SupabaseURL     string
 	SupabaseAnonKey string
 	CallbackURL     string // IAM's own /callback URL, e.g. https://auth.company.com/callback
+	DatabaseURL     string // Supabase project's direct Postgres connection string
 
 	JWTIssuer     string
 	JWTKeyID      string
 	JWTPrivateKey []byte
 
-	EnabledProviders map[string]bool
-	AllowedApps      map[string]AppConfig
+	AllowedApps map[string]AppConfig
 }
 
 func Load() (*Config, error) {
@@ -31,9 +31,12 @@ func Load() (*Config, error) {
 		Port:            getenv("IAM_PORT", "8080"),
 		SupabaseURL:     os.Getenv("SUPABASE_URL"),
 		SupabaseAnonKey: os.Getenv("SUPABASE_ANON_KEY"),
-		CallbackURL:     os.Getenv("IAM_CALLBACK_URL"),
-		JWTIssuer:       getenv("JWT_ISSUER", "https://auth.company.com"),
-		JWTKeyID:        getenv("JWT_KEY_ID", "iam-key-1"),
+		// Must be this server's own /callback route — Supabase redirects
+		// the browser back here, never straight to the application.
+		CallbackURL: getenv("IAM_CALLBACK_URL", "http://localhost:8080/callback"),
+		DatabaseURL: os.Getenv("DATABASE_URL"),
+		JWTIssuer:   getenv("JWT_ISSUER", "https://auth.company.com"),
+		JWTKeyID:    getenv("JWT_KEY_ID", "iam-key-1"),
 		// allow the key to be stored as a single env-var line with literal
 		// \n sequences instead of real newlines (common in .env / compose)
 		JWTPrivateKey: []byte(strings.ReplaceAll(os.Getenv("JWT_PRIVATE_KEY"), `\n`, "\n")),
@@ -45,17 +48,11 @@ func Load() (*Config, error) {
 	if cfg.CallbackURL == "" {
 		return nil, fmt.Errorf("config: IAM_CALLBACK_URL is required")
 	}
+	if cfg.DatabaseURL == "" {
+		return nil, fmt.Errorf("config: DATABASE_URL is required (Supabase project's direct Postgres connection string)")
+	}
 	if len(cfg.JWTPrivateKey) == 0 {
 		return nil, fmt.Errorf("config: JWT_PRIVATE_KEY is required (see cmd/genkey)")
-	}
-
-	providers := getenv("PROVIDERS_ENABLED", "google")
-	cfg.EnabledProviders = map[string]bool{}
-	for _, p := range strings.Split(providers, ",") {
-		p = strings.TrimSpace(p)
-		if p != "" {
-			cfg.EnabledProviders[p] = true
-		}
 	}
 
 	appsJSON := getenv("IAM_ALLOWED_APPS", "{}")

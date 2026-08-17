@@ -2,12 +2,13 @@ package httpapi
 
 import (
 	"encoding/json"
+	"log/slog"
 	"net/http"
 	"time"
 
-	"github.com/company/iam/internal/application/auth"
-	"github.com/company/iam/internal/domain/identity"
-	"github.com/company/iam/internal/domain/provider"
+	"github.com/haribabuk113/iam/internal/application/auth"
+	"github.com/haribabuk113/iam/internal/domain/identity"
+	"github.com/haribabuk113/iam/internal/domain/provider"
 )
 
 // AuthHandler exposes the login/callback/token-exchange endpoints (PRD
@@ -36,6 +37,7 @@ func (h *AuthHandler) Login(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !originAllowed(returnTo, h.redirectOrigins[appID]) {
+		slog.Warn("return_to rejected", "app_id", appID, "return_to", returnTo, "allowed_for_app_id", h.redirectOrigins[appID])
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "return_to_not_allowed"})
 		return
 	}
@@ -133,5 +135,81 @@ func (h *AuthHandler) Token(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	writeJSON(w, http.StatusOK, tokenResponse{AccessToken: token, ExpiresAt: expiresAt, EcosystemID: string(id.ID)})
+}
+
+type signUpRequest struct {
+	Email    string `json:"email"`
+	Password string `json:"password"`
+	FullName string `json:"full_name"`
+}
+
+type signUpResponse struct {
+	Status      string    `json:"status"` // "confirmation_required" | "ok"
+	AccessToken string    `json:"access_token,omitempty"`
+	ExpiresAt   time.Time `json:"expires_at,omitempty"`
+	EcosystemID string    `json:"ecosystem_id,omitempty"`
+}
+
+type signInRequest struct {
+	Email    string `json:"email"`
+	Password string `json:"password"`
+}
+
+// SignUp registers a new email+password user: POST /signup
+// {"email":"...","password":"...","full_name":"..."}. Unlike the OAuth
+// flow, this is a direct API call with no browser redirect involved, so
+// the JWT is returned straight in the response body — the opaque-code
+// indirection in Callback exists only to keep tokens out of browser
+// history/referrer/logs, which doesn't apply here.
+//
+// If the Supabase project requires email confirmation (the default),
+// no token is issued yet — the response reports "confirmation_required"
+// and the caller must sign in after the user confirms their email.
+func (h *AuthHandler) SignUp(w http.ResponseWriter, r *http.Request) {
+	var req signUpRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Email == "" || req.Password == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid_request"})
+		return
+	}
+
+	id, sessionIssued, err := h.svc.SignUp(r.Context(), req.Email, req.Password, req.FullName)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "signup_failed"})
+		return
+	}
+	if !sessionIssued {
+		writeJSON(w, http.StatusAccepted, signUpResponse{Status: "confirmation_required"})
+		return
+	}
+
+	token, expiresAt, err := h.svc.IssueToken(id)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "sign_failed"})
+		return
+	}
+	writeJSON(w, http.StatusOK, signUpResponse{Status: "ok", AccessToken: token, ExpiresAt: expiresAt, EcosystemID: string(id.ID)})
+}
+
+// SignIn authenticates an existing email+password user: POST /signin
+// {"email":"...","password":"..."}.
+func (h *AuthHandler) SignIn(w http.ResponseWriter, r *http.Request) {
+	var req signInRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Email == "" || req.Password == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid_request"})
+		return
+	}
+
+	id, err := h.svc.SignIn(r.Context(), req.Email, req.Password)
+	if err != nil {
+		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "signin_failed"})
+		return
+	}
+
+	token, expiresAt, err := h.svc.IssueToken(id)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "sign_failed"})
+		return
+	}
 	writeJSON(w, http.StatusOK, tokenResponse{AccessToken: token, ExpiresAt: expiresAt, EcosystemID: string(id.ID)})
 }

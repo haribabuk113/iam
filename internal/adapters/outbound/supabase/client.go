@@ -4,29 +4,33 @@
 package supabase
 
 import (
-	"bytes"
 	"context"
-	"encoding/json"
 	"fmt"
-	"io"
-	"net/http"
+	"log/slog"
 	"net/url"
-	"time"
+
+	authgo "github.com/supabase-community/auth-go"
+	"github.com/supabase-community/auth-go/types"
 )
 
-// Client is a thin wrapper around Supabase's GoTrue REST API.
+// Client wraps the official Supabase Auth Go client
+// (supabase-community/auth-go) directly — not the supabase-go umbrella
+// package, whose Storage/Functions/Postgrest sub-clients this service has
+// no use for and never will per the PRD (§16: the IAM is responsible only
+// for identity, authentication, session management, and identity provider
+// integration). auth-go also ships real tagged releases, unlike
+// supabase-go's tagged release at the time of writing (see CLAUDE.md).
 type Client struct {
-	baseURL    string // e.g. https://xxxx.supabase.co
-	anonKey    string
-	httpClient *http.Client
+	baseURL string // e.g. https://xxxx.supabase.co
+	auth    authgo.Client
 }
 
-func NewClient(baseURL, anonKey string) *Client {
-	return &Client{
-		baseURL:    baseURL,
-		anonKey:    anonKey,
-		httpClient: &http.Client{Timeout: 10 * time.Second},
+func NewClient(baseURL, anonKey string) (*Client, error) {
+	if baseURL == "" || anonKey == "" {
+		return nil, fmt.Errorf("supabase: baseURL and anonKey are required")
 	}
+	auth := authgo.New(baseURL, anonKey).WithCustomAuthURL(baseURL + "/auth/v1")
+	return &Client{baseURL: baseURL, auth: auth}, nil
 }
 
 // AuthorizeURL builds the GoTrue /authorize URL that starts the OAuth
@@ -34,6 +38,12 @@ func NewClient(baseURL, anonKey string) *Client {
 // callback URL (carrying our opaque iam_state param) — never an
 // application URL. Supabase performs the provider round trip and
 // redirects the browser back to exactly this URL with ?code=... appended.
+//
+// Built by hand rather than through the client library's Auth.Authorize:
+// that call performs its own server-side round trip to Supabase and
+// generates its own PKCE verifier, which doesn't fit the IAM's flow —
+// the verifier here is generated at /login time (httpapi/pkce.go) and
+// must survive, keyed by state, until the browser's callback arrives.
 func (c *Client) AuthorizeURL(provider, redirectTo, codeChallenge string) string {
 	v := url.Values{}
 	v.Set("provider", provider)
@@ -43,93 +53,46 @@ func (c *Client) AuthorizeURL(provider, redirectTo, codeChallenge string) string
 	return fmt.Sprintf("%s/auth/v1/authorize?%s", c.baseURL, v.Encode())
 }
 
-type Session struct {
-	AccessToken  string `json:"access_token"`
-	RefreshToken string `json:"refresh_token"`
-	ExpiresIn    int    `json:"expires_in"`
-	TokenType    string `json:"token_type"`
-	User         User   `json:"user"`
-}
-
-type User struct {
-	ID               string         `json:"id"`
-	Aud              string         `json:"aud"`
-	Role             string         `json:"role"`
-	Email            string         `json:"email"`
-	EmailConfirmedAt *string        `json:"email_confirmed_at"`
-	AppMetadata      map[string]any `json:"app_metadata"`
-	UserMetadata     map[string]any `json:"user_metadata"`
-	CreatedAt        string         `json:"created_at"`
-}
-
-type gotrueError struct {
-	Error            string `json:"error"`
-	ErrorDescription string `json:"error_description"`
-	Msg              string `json:"msg"`
-}
-
 // ExchangeCodeForSession completes the PKCE flow: trades the
 // authorization code from the callback, plus the verifier generated at
 // /login time, for a Supabase session. The resulting AccessToken is
 // Supabase's own JWT — used ONLY to identify the user (see normalize()
 // in adapter.go) and is never forwarded to applications. The IAM mints
 // its own JWT afterward (see adapters/outbound/jwtsign).
-func (c *Client) ExchangeCodeForSession(ctx context.Context, code, codeVerifier string) (*Session, error) {
-	body, _ := json.Marshal(map[string]string{
-		"auth_code":     code,
-		"code_verifier": codeVerifier,
+func (c *Client) ExchangeCodeForSession(ctx context.Context, code, codeVerifier string) (*types.Session, error) {
+	resp, err := c.auth.Token(types.TokenRequest{
+		GrantType:    "pkce",
+		Code:         code,
+		CodeVerifier: codeVerifier,
 	})
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
-		c.baseURL+"/auth/v1/token?grant_type=pkce", bytes.NewReader(body))
-	if err != nil {
-		return nil, err
-	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("apikey", c.anonKey)
-
-	resp, err := c.httpClient.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("supabase: exchange code: %w", err)
 	}
-	defer resp.Body.Close()
-	raw, _ := io.ReadAll(resp.Body)
-
-	if resp.StatusCode != http.StatusOK {
-		var gerr gotrueError
-		_ = json.Unmarshal(raw, &gerr)
-		return nil, fmt.Errorf("supabase: exchange code failed (%d): %s %s", resp.StatusCode, gerr.Error, gerr.ErrorDescription)
-	}
-
-	var sess Session
-	if err := json.Unmarshal(raw, &sess); err != nil {
-		return nil, fmt.Errorf("supabase: decode session: %w", err)
-	}
-	return &sess, nil
+	return &resp.Session, nil
 }
 
-// GetUser fetches the full user object for a Supabase access token. Not
-// needed for the login flow itself (ExchangeCodeForSession already
-// returns the user) but kept for future session-refresh validation.
-func (c *Client) GetUser(ctx context.Context, accessToken string) (*User, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+"/auth/v1/user", nil)
+// SignUp registers a new email+password user. If the Supabase project
+// requires email confirmation (the default), no session comes back yet —
+// resp.Session.AccessToken is empty until the user clicks the
+// confirmation link and Supabase issues one.
+func (c *Client) SignUp(ctx context.Context, email, password, fullName string) (*types.SignupResponse, error) {
+	resp, err := c.auth.Signup(types.SignupRequest{
+		Email:    email,
+		Password: password,
+		Data:     map[string]any{"full_name": fullName},
+	})
+	slog.Info("supabase signup response", "resp", resp, "err", err)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("supabase: signup: %w", err)
 	}
-	req.Header.Set("apikey", c.anonKey)
-	req.Header.Set("Authorization", "Bearer "+accessToken)
+	return resp, nil
+}
 
-	resp, err := c.httpClient.Do(req)
+// SignInWithPassword authenticates an existing email+password user.
+func (c *Client) SignInWithPassword(ctx context.Context, email, password string) (*types.Session, error) {
+	resp, err := c.auth.SignInWithEmailPassword(email, password)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("supabase: sign in: %w", err)
 	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		raw, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("supabase: get user failed (%d): %s", resp.StatusCode, raw)
-	}
-	var u User
-	if err := json.NewDecoder(resp.Body).Decode(&u); err != nil {
-		return nil, err
-	}
-	return &u, nil
+	return &resp.Session, nil
 }

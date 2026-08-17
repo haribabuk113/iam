@@ -9,9 +9,9 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/company/iam/internal/application/ports/outbound"
-	"github.com/company/iam/internal/domain/identity"
-	"github.com/company/iam/internal/domain/provider"
+	"github.com/haribabuk113/iam/internal/application/ports/outbound"
+	"github.com/haribabuk113/iam/internal/domain/identity"
+	"github.com/haribabuk113/iam/internal/domain/provider"
 )
 
 type Service struct {
@@ -43,7 +43,39 @@ func (s *Service) CompleteLogin(ctx context.Context, code, codeVerifier string) 
 	if err != nil {
 		return identity.Identity{}, fmt.Errorf("auth: exchange code: %w", err)
 	}
+	return s.resolveIdentity(ctx, ext)
+}
 
+// SignUp registers a new email+password user with Supabase. sessionIssued
+// is false when Supabase requires email confirmation (its default) — the
+// returned Identity is the zero value in that case, and the caller must
+// tell the user to confirm their email before signing in.
+func (s *Service) SignUp(ctx context.Context, email, password, fullName string) (id identity.Identity, sessionIssued bool, err error) {
+	ext, sessionIssued, err := s.authProvider.SignUpWithPassword(ctx, email, password, fullName)
+	if err != nil {
+		return identity.Identity{}, false, fmt.Errorf("auth: signup: %w", err)
+	}
+	if !sessionIssued {
+		return identity.Identity{}, false, nil
+	}
+	id, err = s.resolveIdentity(ctx, ext)
+	return id, true, err
+}
+
+// SignIn authenticates an existing email+password user.
+func (s *Service) SignIn(ctx context.Context, email, password string) (identity.Identity, error) {
+	ext, err := s.authProvider.SignInWithPassword(ctx, email, password)
+	if err != nil {
+		return identity.Identity{}, fmt.Errorf("auth: signin: %w", err)
+	}
+	return s.resolveIdentity(ctx, ext)
+}
+
+// resolveIdentity maps a verified ExternalIdentity (from any auth method —
+// OAuth callback or password signup/signin) onto the IAM's own Identity:
+// reusing an existing one on verified-email match (architecture plan §22,
+// decision #1), linking the provider, or creating a new Identity.
+func (s *Service) resolveIdentity(ctx context.Context, ext outbound.ExternalIdentity) (identity.Identity, error) {
 	if existing, err := s.identities.FindByProviderUser(ctx, ext.Provider, ext.ProviderUserID); err != nil {
 		return identity.Identity{}, fmt.Errorf("auth: lookup by provider user: %w", err)
 	} else if existing != nil {

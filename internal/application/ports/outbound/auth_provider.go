@@ -3,7 +3,7 @@ package outbound
 import (
 	"context"
 
-	"github.com/company/iam/internal/domain/provider"
+	"github.com/haribabuk113/iam/internal/domain/provider"
 )
 
 // ExternalIdentity is the normalized shape every provider adapter must
@@ -30,4 +30,14 @@ type AuthProviderPort interface {
 	// ExchangeCode trades an authorization code + PKCE verifier for a
 	// verified external identity.
 	ExchangeCode(ctx context.Context, code, codeVerifier string) (ExternalIdentity, error)
+
+	// SignUpWithPassword registers a new email+password user. sessionIssued
+	// is false when the backend requires email confirmation before a
+	// session can be issued (Supabase's default) — the caller must not
+	// resolve an Identity in that case, since the ExternalIdentity has no
+	// verified session behind it yet.
+	SignUpWithPassword(ctx context.Context, email, password, fullName string) (ext ExternalIdentity, sessionIssued bool, err error)
+
+	// SignInWithPassword authenticates an existing email+password user.
+	SignInWithPassword(ctx context.Context, email, password string) (ExternalIdentity, error)
 }

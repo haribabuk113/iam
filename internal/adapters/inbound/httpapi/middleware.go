@@ -8,10 +8,6 @@ import (
 	"github.com/oklog/ulid/v2"
 )
 
-func withMiddleware(h http.Handler) http.Handler {
-	return requestID(recoverer(logger(h)))
-}
-
 func requestID(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		rid := ulid.Make().String()

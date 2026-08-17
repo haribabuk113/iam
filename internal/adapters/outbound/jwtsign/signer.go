@@ -15,7 +15,7 @@ import (
 
 	"github.com/golang-jwt/jwt/v5"
 
-	"github.com/company/iam/internal/application/ports/outbound"
+	"github.com/haribabuk113/iam/internal/application/ports/outbound"
 )
 
 const accessTokenTTL = 10 * time.Minute

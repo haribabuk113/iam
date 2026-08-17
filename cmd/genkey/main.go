@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/company/iam/internal/adapters/outbound/jwtsign"
+	"github.com/haribabuk113/iam/internal/adapters/outbound/jwtsign"
 )
 
 func main() {

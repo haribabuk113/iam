@@ -1,0 +1,17 @@
+{
+    "version":"0.2.0",
+    "configurations": [
+    {
+        "name": "Debug iam",
+        "type": "go",
+        "request": "launch",
+        "mode": "debug",
+        "program": "${workspaceFolder}/cmd/server",
+        "env": {
+            "DATABASE_URL": "",
+            "IAM_ALLOWED_APPS": "",
+            "JWT_PRIVATE_KEY": ""
+        }
+    }
+    ]
+}

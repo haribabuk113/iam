@@ -4,18 +4,19 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"log/slog"
 	"net/http"
 	"os"
 	"time"
 
-	"github.com/company/iam/internal/adapters/inbound/httpapi"
-	"github.com/company/iam/internal/adapters/outbound/jwtsign"
-	"github.com/company/iam/internal/adapters/outbound/memoryrepo"
-	"github.com/company/iam/internal/adapters/outbound/supabase"
-	"github.com/company/iam/internal/application/auth"
-	"github.com/company/iam/internal/config"
+	"github.com/haribabuk113/iam/internal/adapters/inbound/httpapi"
+	"github.com/haribabuk113/iam/internal/adapters/outbound/jwtsign"
+	"github.com/haribabuk113/iam/internal/adapters/outbound/postgres"
+	"github.com/haribabuk113/iam/internal/adapters/outbound/supabase"
+	"github.com/haribabuk113/iam/internal/application/auth"
+	"github.com/haribabuk113/iam/internal/config"
 )
 
 func main() {
@@ -36,9 +37,17 @@ func run() error {
 		return fmt.Errorf("load signing key: %w", err)
 	}
 
-	client := supabase.NewClient(cfg.SupabaseURL, cfg.SupabaseAnonKey)
+	client, err := supabase.NewClient(cfg.SupabaseURL, cfg.SupabaseAnonKey)
+	if err != nil {
+		return fmt.Errorf("supabase client: %w", err)
+	}
 	authProvider := supabase.NewAdapter(client, cfg.CallbackURL)
-	identities := memoryrepo.New()
+
+	identities, err := postgres.New(context.Background(), cfg.DatabaseURL)
+	if err != nil {
+		return fmt.Errorf("postgres identities: %w", err)
+	}
+	defer identities.Close()
 
 	svc := auth.NewService(authProvider, identities, signer)
 

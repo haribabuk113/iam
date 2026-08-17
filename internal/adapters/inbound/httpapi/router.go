@@ -3,22 +3,30 @@ package httpapi
 import (
 	"net/http"
 
-	"github.com/company/iam/internal/application/ports/outbound"
+	"github.com/go-chi/chi/v5"
+
+	"github.com/haribabuk113/iam/internal/application/ports/outbound"
 )
 
 // NewRouter wires the IAM's public HTTP surface (architecture plan §12):
-// login/callback/token for the auth flow, JWKS for token verification,
-// and a liveness probe.
+// login/callback/token/signup/signin for the auth flow, JWKS for token
+// verification, and a liveness probe. Built on chi rather than the stdlib
+// mux — chi's routing tree and middleware/subrouter model is the standard
+// choice once a Go HTTP API needs to grow (more routes, per-route
+// middleware like timeouts or rate limits) without becoming unwieldy.
 func NewRouter(auth *AuthHandler, tokens outbound.TokenSigner) http.Handler {
-	mux := http.NewServeMux()
+	r := chi.NewRouter()
+	r.Use(requestID, recoverer, logger)
 
-	mux.HandleFunc("GET /login", auth.Login)
-	mux.HandleFunc("GET /callback", auth.Callback)
-	mux.HandleFunc("POST /token", auth.Token)
-	mux.HandleFunc("GET /.well-known/jwks.json", jwksHandler(tokens))
-	mux.HandleFunc("GET /healthz", healthHandler)
+	r.Get("/login", auth.Login)
+	r.Get("/callback", auth.Callback)
+	r.Post("/token", auth.Token)
+	r.Post("/signup", auth.SignUp)
+	r.Post("/signin", auth.SignIn)
+	r.Get("/.well-known/jwks.json", jwksHandler(tokens))
+	r.Get("/healthz", healthHandler)
 
-	return withMiddleware(mux)
+	return r
 }
 
 func jwksHandler(tokens outbound.TokenSigner) http.HandlerFunc {

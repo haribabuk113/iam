@@ -4,7 +4,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/company/iam/internal/domain/provider"
+	"github.com/haribabuk113/iam/internal/domain/provider"
 )
 
 type loginState struct {

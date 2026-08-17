@@ -3,8 +3,8 @@ package outbound
 import (
 	"context"
 
-	"github.com/company/iam/internal/domain/identity"
-	"github.com/company/iam/internal/domain/provider"
+	"github.com/haribabuk113/iam/internal/domain/identity"
+	"github.com/haribabuk113/iam/internal/domain/provider"
 )
 
 // IdentityRepository is the IAM's own system of record for identity

@@ -13,6 +13,7 @@ const (
 	GitHub    Name = "github"
 	GitLab    Name = "gitlab"
 	Microsoft Name = "azure"
+	LinkedIn  Name = "linkedin_oidc" // LinkedIn deprecated its old OAuth API; Supabase moved to OIDC
 	Meta      Name = "facebook"
 	X         Name = "twitter"
 	Discord   Name = "discord"
@@ -23,9 +24,14 @@ const (
 
 // Apple is intentionally absent (PRD §7) — not representable, not just disabled.
 
+// Email identifies a password-based (non-SSO) identity. It never flows
+// through Valid() — that gate is for the OAuth /login endpoint only, and
+// password signup/signin (POST /signup, POST /signin) never touches it.
+const Email Name = "email"
+
 func (n Name) Valid() bool {
 	switch n {
-	case Google, GitHub, GitLab, Microsoft, Meta, X, Discord, Twitch, Slack, Snapchat:
+	case Google, GitHub, GitLab, Microsoft, LinkedIn, Meta, X, Discord, Twitch, Slack, Snapchat:
 		return true
 	default:
 		return false
