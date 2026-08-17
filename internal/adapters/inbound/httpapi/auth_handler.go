@@ -2,11 +2,11 @@ package httpapi
 
 import (
 	"encoding/json"
-	"log/slog"
 	"net/http"
 	"time"
 
 	"github.com/haribabuk113/iam/internal/application/auth"
+	"github.com/haribabuk113/iam/internal/application/ports/outbound"
 	"github.com/haribabuk113/iam/internal/domain/identity"
 	"github.com/haribabuk113/iam/internal/domain/provider"
 )
@@ -20,10 +20,11 @@ type AuthHandler struct {
 	states          *StateStore
 	exchanges       *ExchangeStore
 	redirectOrigins map[string][]string // app_id -> allowed return_to origins
+	log             outbound.Logger
 }
 
-func NewAuthHandler(svc *auth.Service, states *StateStore, exchanges *ExchangeStore, redirectOrigins map[string][]string) *AuthHandler {
-	return &AuthHandler{svc: svc, states: states, exchanges: exchanges, redirectOrigins: redirectOrigins}
+func NewAuthHandler(svc *auth.Service, states *StateStore, exchanges *ExchangeStore, redirectOrigins map[string][]string, log outbound.Logger) *AuthHandler {
+	return &AuthHandler{svc: svc, states: states, exchanges: exchanges, redirectOrigins: redirectOrigins, log: log}
 }
 
 // Login starts the SSO flow: GET /login?provider=google&app_id=...&return_to=...
@@ -37,7 +38,7 @@ func (h *AuthHandler) Login(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !originAllowed(returnTo, h.redirectOrigins[appID]) {
-		slog.Warn("return_to rejected", "app_id", appID, "return_to", returnTo, "allowed_for_app_id", h.redirectOrigins[appID])
+		h.log.Warn("return_to rejected", "app_id", appID, "return_to", returnTo, "allowed_for_app_id", h.redirectOrigins[appID])
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "return_to_not_allowed"})
 		return
 	}

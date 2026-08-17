@@ -6,11 +6,12 @@ package supabase
 import (
 	"context"
 	"fmt"
-	"log/slog"
 	"net/url"
 
 	authgo "github.com/supabase-community/auth-go"
 	"github.com/supabase-community/auth-go/types"
+
+	"github.com/haribabuk113/iam/internal/application/ports/outbound"
 )
 
 // Client wraps the official Supabase Auth Go client
@@ -23,14 +24,15 @@ import (
 type Client struct {
 	baseURL string // e.g. https://xxxx.supabase.co
 	auth    authgo.Client
+	log     outbound.Logger
 }
 
-func NewClient(baseURL, anonKey string) (*Client, error) {
+func NewClient(baseURL, anonKey string, log outbound.Logger) (*Client, error) {
 	if baseURL == "" || anonKey == "" {
 		return nil, fmt.Errorf("supabase: baseURL and anonKey are required")
 	}
 	auth := authgo.New(baseURL, anonKey).WithCustomAuthURL(baseURL + "/auth/v1")
-	return &Client{baseURL: baseURL, auth: auth}, nil
+	return &Client{baseURL: baseURL, auth: auth, log: log}, nil
 }
 
 // AuthorizeURL builds the GoTrue /authorize URL that starts the OAuth
@@ -81,7 +83,7 @@ func (c *Client) SignUp(ctx context.Context, email, password, fullName string) (
 		Password: password,
 		Data:     map[string]any{"full_name": fullName},
 	})
-	slog.Info("supabase signup response", "resp", resp, "err", err)
+	c.log.Info("supabase signup response", "resp", resp, "err", err)
 	if err != nil {
 		return nil, fmt.Errorf("supabase: signup: %w", err)
 	}

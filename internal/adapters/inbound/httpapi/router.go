@@ -14,9 +14,9 @@ import (
 // mux — chi's routing tree and middleware/subrouter model is the standard
 // choice once a Go HTTP API needs to grow (more routes, per-route
 // middleware like timeouts or rate limits) without becoming unwieldy.
-func NewRouter(auth *AuthHandler, tokens outbound.TokenSigner) http.Handler {
+func NewRouter(auth *AuthHandler, tokens outbound.TokenSigner, log outbound.Logger) http.Handler {
 	r := chi.NewRouter()
-	r.Use(requestID, recoverer, logger)
+	r.Use(requestID, recoverer(log), requestLogger(log))
 
 	r.Get("/login", auth.Login)
 	r.Get("/callback", auth.Callback)

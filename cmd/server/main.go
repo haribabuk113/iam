@@ -6,7 +6,6 @@ package main
 import (
 	"context"
 	"fmt"
-	"log/slog"
 	"net/http"
 	"os"
 	"time"
@@ -15,6 +14,7 @@ import (
 	"github.com/haribabuk113/iam/internal/adapters/outbound/jwtsign"
 	"github.com/haribabuk113/iam/internal/adapters/outbound/postgres"
 	"github.com/haribabuk113/iam/internal/adapters/outbound/supabase"
+	"github.com/haribabuk113/iam/internal/adapters/outbound/ziplog"
 	"github.com/haribabuk113/iam/internal/application/auth"
 	"github.com/haribabuk113/iam/internal/config"
 )
@@ -32,12 +32,21 @@ func run() error {
 		return err
 	}
 
+	// ziplog is the only concrete logger cmd/server knows about — swap it
+	// for another outbound.Logger implementation here and nothing else in
+	// the codebase changes.
+	log, err := ziplog.New(cfg.Env)
+	if err != nil {
+		return fmt.Errorf("init logger: %w", err)
+	}
+	defer log.Sync()
+
 	signer, err := jwtsign.NewSigner(cfg.JWTPrivateKey, cfg.JWTIssuer, cfg.JWTKeyID)
 	if err != nil {
 		return fmt.Errorf("load signing key: %w", err)
 	}
 
-	client, err := supabase.NewClient(cfg.SupabaseURL, cfg.SupabaseAnonKey)
+	client, err := supabase.NewClient(cfg.SupabaseURL, cfg.SupabaseAnonKey, log)
 	if err != nil {
 		return fmt.Errorf("supabase client: %w", err)
 	}
@@ -59,10 +68,10 @@ func run() error {
 		redirectOrigins[appID] = app.RedirectOrigins
 	}
 
-	authHandler := httpapi.NewAuthHandler(svc, states, exchanges, redirectOrigins)
-	router := httpapi.NewRouter(authHandler, signer)
+	authHandler := httpapi.NewAuthHandler(svc, states, exchanges, redirectOrigins, log)
+	router := httpapi.NewRouter(authHandler, signer, log)
 
 	addr := ":" + cfg.Port
-	slog.Info("iam server starting", "addr", addr, "issuer", cfg.JWTIssuer)
+	log.Info("iam server starting", "addr", addr, "issuer", cfg.JWTIssuer)
 	return http.ListenAndServe(addr, router)
 }

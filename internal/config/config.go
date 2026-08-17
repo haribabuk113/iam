@@ -13,6 +13,7 @@ type AppConfig struct {
 
 type Config struct {
 	Port string
+	Env  string // "production" or "development" — controls log format (see adapters/outbound/ziplog)
 
 	SupabaseURL     string
 	SupabaseAnonKey string
@@ -29,6 +30,7 @@ type Config struct {
 func Load() (*Config, error) {
 	cfg := &Config{
 		Port:            getenv("IAM_PORT", "8080"),
+		Env:             getenv("IAM_ENV", "development"),
 		SupabaseURL:     os.Getenv("SUPABASE_URL"),
 		SupabaseAnonKey: os.Getenv("SUPABASE_ANON_KEY"),
 		// Must be this server's own /callback route — Supabase redirects
