@@ -1,0 +1,20 @@
+services:
+  iam-db:
+    image: postgres:15
+    environment:
+      POSTGRES_USER: iam
+      POSTGRES_PASSWORD: iam
+      POSTGRES_DB: iam
+    ports:
+      - "5434:5432" # separate from vol-auth's auth-db (5433) — different DB, different concern
+    volumes:
+      - iam-db-data:/var/lib/postgresql/data
+      - ./internal/adapters/outbound/postgres/schema.sql:/docker-entrypoint-initdb.d/schema.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U iam -d iam"]
+      interval: 2s
+      timeout: 5s
+      retries: 20
+
+volumes:
+  iam-db-data:
