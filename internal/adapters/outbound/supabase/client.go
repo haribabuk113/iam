@@ -22,16 +22,20 @@ import (
 // integration). auth-go also ships real tagged releases, unlike
 // supabase-go's tagged release at the time of writing (see CLAUDE.md).
 type Client struct {
-	baseURL string // e.g. https://xxxx.supabase.co
+	baseURL string // e.g. http://localhost:9999 (self-hosted GoTrue, no Kong prefix)
 	auth    authgo.Client
 	log     outbound.Logger
 }
 
+// anonKey is sent as the apiKey header on every request but self-hosted
+// GoTrue (no Kong gateway in front) never checks it — any non-empty
+// placeholder works. Kept required so nothing silently breaks if a Kong
+// layer is added later and starts enforcing it.
 func NewClient(baseURL, anonKey string, log outbound.Logger) (*Client, error) {
 	if baseURL == "" || anonKey == "" {
 		return nil, fmt.Errorf("supabase: baseURL and anonKey are required")
 	}
-	auth := authgo.New(baseURL, anonKey).WithCustomAuthURL(baseURL + "/auth/v1")
+	auth := authgo.New(baseURL, anonKey).WithCustomAuthURL(baseURL)
 	return &Client{baseURL: baseURL, auth: auth, log: log}, nil
 }
 
@@ -52,7 +56,7 @@ func (c *Client) AuthorizeURL(provider, redirectTo, codeChallenge string) string
 	v.Set("redirect_to", redirectTo)
 	v.Set("code_challenge", codeChallenge)
 	v.Set("code_challenge_method", "s256")
-	return fmt.Sprintf("%s/auth/v1/authorize?%s", c.baseURL, v.Encode())
+	return fmt.Sprintf("%s/authorize?%s", c.baseURL, v.Encode())
 }
 
 // ExchangeCodeForSession completes the PKCE flow: trades the
