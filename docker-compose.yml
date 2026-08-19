@@ -1,4 +1,72 @@
 services:
+  # --- GoTrue's own auth stack (formerly the sibling vol-auth repo, now
+  # folded in here — see README for why) ---
+  auth-db:
+    image: postgres:15
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${AUTH_DB_NAME}
+    ports:
+      - "5433:5432" # separate from iam-db (5434) — different DB, different concern
+    volumes:
+      - auth-db-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d ${AUTH_DB_NAME}"]
+      interval: 2s
+      timeout: 5s
+      retries: 20
+
+  # Creates GoTrue's role/schema and sets search_path before GoTrue's first
+  # connection. Must happen here, not via a post-startup ALTER ROLE — that
+  # breaks GoTrue's migration runner on restart (see scripts/auth-db-init.sh).
+  auth-db-init:
+    image: postgres:15
+    depends_on:
+      auth-db:
+        condition: service_healthy
+    environment:
+      PGPASSWORD: ${POSTGRES_PASSWORD}
+      AUTH_DB_USER: ${AUTH_DB_USER}
+      AUTH_DB_PASSWORD: ${AUTH_DB_PASSWORD}
+      AUTH_DB_NAME: ${AUTH_DB_NAME}
+    volumes:
+      - ./scripts/auth-db-init.sh:/auth-db-init.sh:ro
+    entrypoint: ["bash", "/auth-db-init.sh"]
+    restart: "no"
+
+  gotrue:
+    image: supabase/gotrue:v2.195.0
+    depends_on:
+      auth-db-init:
+        condition: service_completed_successfully
+    restart: unless-stopped
+    ports:
+      - "9999:9999"
+    environment:
+      GOTRUE_API_HOST: 0.0.0.0
+      GOTRUE_API_PORT: 9999
+      API_EXTERNAL_URL: http://localhost:9999
+
+      GOTRUE_DB_DRIVER: postgres
+      GOTRUE_DB_DATABASE_URL: postgres://${AUTH_DB_USER}:${AUTH_DB_PASSWORD}@auth-db:5432/${AUTH_DB_NAME}?sslmode=disable
+      GOTRUE_SITE_URL: http://localhost:3000
+      GOTRUE_URI_ALLOW_LIST: "http://localhost:3000/*,http://localhost:8080/*" # 8080 = IAM's own /callback
+
+      GOTRUE_JWT_SECRET: ${GOTRUE_JWT_SECRET}
+      GOTRUE_JWT_EXP: 3600
+      GOTRUE_JWT_AUD: authenticated
+
+      GOTRUE_DISABLE_SIGNUP: "false"
+      GOTRUE_EXTERNAL_EMAIL_ENABLED: "true"
+      GOTRUE_MAILER_AUTOCONFIRM: "true" # dev only
+
+      GOTRUE_EXTERNAL_GOOGLE_ENABLED: "true"
+      GOTRUE_EXTERNAL_GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID}
+      GOTRUE_EXTERNAL_GOOGLE_SECRET: ${GOOGLE_CLIENT_SECRET}
+      GOTRUE_EXTERNAL_GOOGLE_REDIRECT_URI: http://localhost:9999/callback # dev only — turn off in prod
+
+  # --- IAM's own identity store ---
   iam-db:
     image: postgres:15
     environment:
@@ -6,7 +74,7 @@ services:
       POSTGRES_PASSWORD: iam
       POSTGRES_DB: iam
     ports:
-      - "5434:5432" # separate from vol-auth's auth-db (5433) — different DB, different concern
+      - "5434:5432" # separate from auth-db (5433) — different DB, different concern
     volumes:
       - iam-db-data:/var/lib/postgresql/data
       - ./internal/adapters/outbound/postgres/schema.sql:/docker-entrypoint-initdb.d/schema.sql:ro
@@ -18,3 +86,4 @@ services:
 
 volumes:
   iam-db-data:
+  auth-db-data:

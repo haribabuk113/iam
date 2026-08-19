@@ -1,18 +1,11 @@
 # IAM — local testing guide
 
-Two moving parts, two repos:
+One repo, one `docker-compose.yml`, two Postgres databases:
 
-- **this repo (`iam/`)** — the IAM service itself, plus `iam-db` (its own
-  Postgres, via `docker-compose.yml` here).
-- **`vol-auth/`** — a sibling repo, the self-hosted Supabase Auth (GoTrue)
-  stack. IAM talks to it as its only SSO provider backend.
-
-## Why two Postgres databases
-
-- **`auth-db`** (vol-auth, port 5433) — GoTrue's own database. Owns the
-  `auth` schema: raw provider identities, sessions, refresh tokens. IAM
-  never reads this directly.
-- **`iam-db`** (this repo, port 5434) — IAM's own identity store
+- **`auth-db`** (port 5433) — GoTrue's own database. Owns the `auth`
+  schema: raw provider identities, sessions, refresh tokens. IAM never
+  reads this directly.
+- **`iam-db`** (port 5434) — IAM's own identity store
   (`internal/adapters/outbound/postgres`, schema in `schema.sql`). Owns
   IAM's normalized `identities` — the deduped/merged records IAM's own
   JWTs are signed from.
@@ -20,18 +13,22 @@ Two moving parts, two repos:
 This split is the architecture's core invariant made physical: IAM never
 forwards a Supabase-issued token to an app. It resolves a GoTrue identity
 into its own `Identity`, then mints its own JWT. Merging the two DBs would
-leak GoTrue's schema into IAM's domain.
+leak GoTrue's schema into IAM's domain. They're two databases in one
+compose file (not two repos) purely so a fresh clone can stand the whole
+thing up with one `docker compose up`.
 
-## 1. Start the GoTrue stack (vol-auth)
+## 1. Start the whole stack and generate a signing key
 
 ```
-cd ../vol-auth
-cp .env.example .env   # if you don't already have one — fill in the values below
+cp .env.sample .env   # fill in the values below
 docker compose up -d
+docker compose ps     # wait for auth-db and iam-db healthy, auth-db-init exited(0)
 curl http://localhost:9999/health   # {"version":"...","name":"GoTrue",...}
+
+go run ./cmd/genkey   # copy the JWT_PRIVATE_KEY block out
 ```
 
-`vol-auth/.env` needs:
+`.env` needs, in addition to the IAM vars below:
 
 ```
 POSTGRES_PASSWORD=<anything>
@@ -43,26 +40,17 @@ GOOGLE_CLIENT_ID=       # see "Testing Google sign-in" below — optional
 GOOGLE_CLIENT_SECRET=   # optional
 ```
 
-## 2. Start iam-db and generate a signing key
+`auth-db-init` sets GoTrue's role/schema/search_path once, before GoTrue's
+first connection — doing it after GoTrue has started breaks its migration
+runner on restart, so don't `ALTER ROLE` by hand against a running stack;
+edit `scripts/auth-db-init.sh` and recreate the volume instead.
+
+## 2. Configure and run IAM
+
+The rest of `.env` (same file as above):
 
 ```
-cd iam
-docker compose up -d iam-db
-docker compose ps iam-db   # wait for healthy — schema.sql auto-applies on first boot
-
-go run ./cmd/genkey        # copy the JWT_PRIVATE_KEY block out
-```
-
-## 3. Configure and run IAM
-
-```
-cp .env.sample .env
-```
-
-Fill in `.env`:
-
-```
-SUPABASE_URL=http://localhost:9999          # vol-auth's GoTrue, no /auth/v1 prefix
+SUPABASE_URL=http://localhost:9999          # this stack's GoTrue, no /auth/v1 prefix
 SUPABASE_ANON_KEY=local-dev-placeholder      # ignored by raw self-hosted GoTrue, any non-empty value works
 DATABASE_URL=postgresql://iam:iam@localhost:5434/iam?sslmode=disable
 IAM_CALLBACK_URL=http://localhost:8080/callback
@@ -85,8 +73,9 @@ curl -X POST http://localhost:8080/signup -H "Content-Type: application/json" \
   -d '{"email":"test@example.com","password":"testpass123","full_name":"Test User"}'
 ```
 
-`GOTRUE_MAILER_AUTOCONFIRM=true` in vol-auth's compose means signup returns
-a token immediately — no email step. Response: `{"status":"ok","access_token":"...","ecosystem_id":"..."}`.
+`GOTRUE_MAILER_AUTOCONFIRM=true` in `docker-compose.yml` means signup
+returns a token immediately — no email step. Response:
+`{"status":"ok","access_token":"...","ecosystem_id":"..."}`.
 
 Sign in again with the same credentials:
 
@@ -108,11 +97,11 @@ fake that leg — but a free, zero-billing dev client takes 5 minutes:
    application**.
 4. Authorized redirect URI: `http://localhost:9999/callback` — GoTrue's
    callback, not IAM's, since GoTrue is the one talking to Google.
-5. Copy the client ID/secret into `vol-auth/.env`'s `GOOGLE_CLIENT_ID` /
+5. Copy the client ID/secret into `.env`'s `GOOGLE_CLIENT_ID` /
    `GOOGLE_CLIENT_SECRET`, then:
 
 ```
-cd ../vol-auth && docker compose up -d gotrue --force-recreate
+docker compose up -d gotrue --force-recreate
 curl http://localhost:9999/settings   # confirm "google":true
 ```
 
@@ -145,7 +134,6 @@ docker exec -it $(docker compose ps -q iam-db) psql -U iam -d iam \
 **GoTrue's own user record** (what it thinks it authenticated):
 
 ```
-cd ../vol-auth
 docker exec -it $(docker compose ps -q auth-db) psql -U supabase_auth_admin -d auth \
   -c "select id, email, raw_app_meta_data->>'provider' as provider, created_at from auth.users;"
 ```
@@ -170,6 +158,5 @@ curl http://localhost:8080/.well-known/jwks.json
 ## Resetting everything
 
 ```
-cd iam && docker compose down -v          # wipes iam-db
-cd ../vol-auth && docker compose down -v  # wipes auth-db
+docker compose down -v   # wipes both auth-db and iam-db
 ```
