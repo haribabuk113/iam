@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 )
 
@@ -23,8 +24,18 @@ type Config struct {
 	JWTIssuer     string
 	JWTKeyID      string
 	JWTPrivateKey []byte
+	// JWTJWKSExtraKeys is raw JSON — cmd/server hands it to
+	// jwtsign.ParseExtraKeys, keeping config free of adapter imports.
+	// Published in JWKS but never signed with — see jwtsign.NewSigner's
+	// rotation doc.
+	JWTJWKSExtraKeys string
 
 	AllowedApps map[string]AppConfig
+
+	// Per-IP token bucket guarding /login, /signup, /signin — see
+	// adapters/inbound/httpapi rateLimit.
+	RateLimitRPS   float64
+	RateLimitBurst int
 }
 
 func Load() (*Config, error) {
@@ -41,7 +52,11 @@ func Load() (*Config, error) {
 		JWTKeyID:    getenv("JWT_KEY_ID", "iam-key-1"),
 		// allow the key to be stored as a single env-var line with literal
 		// \n sequences instead of real newlines (common in .env / compose)
-		JWTPrivateKey: []byte(strings.ReplaceAll(os.Getenv("JWT_PRIVATE_KEY"), `\n`, "\n")),
+		JWTPrivateKey:    []byte(strings.ReplaceAll(os.Getenv("JWT_PRIVATE_KEY"), `\n`, "\n")),
+		JWTJWKSExtraKeys: getenv("JWT_JWKS_EXTRA_KEYS", "[]"),
+
+		RateLimitRPS:   getenvFloat("IAM_RATE_LIMIT_RPS", 1),
+		RateLimitBurst: getenvInt("IAM_RATE_LIMIT_BURST", 5),
 	}
 
 	if cfg.SupabaseURL == "" || cfg.SupabaseAnonKey == "" {
@@ -70,4 +85,28 @@ func getenv(key, fallback string) string {
 		return v
 	}
 	return fallback
+}
+
+func getenvFloat(key string, fallback float64) float64 {
+	v := os.Getenv(key)
+	if v == "" {
+		return fallback
+	}
+	f, err := strconv.ParseFloat(v, 64)
+	if err != nil {
+		return fallback
+	}
+	return f
+}
+
+func getenvInt(key string, fallback int) int {
+	v := os.Getenv(key)
+	if v == "" {
+		return fallback
+	}
+	i, err := strconv.Atoi(v)
+	if err != nil {
+		return fallback
+	}
+	return i
 }

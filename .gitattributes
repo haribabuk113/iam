@@ -1,0 +1,12 @@
+# Force LF for everything text-ish, regardless of core.autocrlf on the
+# checking-out machine. Go tooling (gofmt) and shell scripts run inside
+# Linux containers both choke on CRLF — see the .sh fix this was added
+# for, which the same problem existed for every .go file in the repo.
+* text=auto eol=lf
+
+*.go   text eol=lf
+*.sh   text eol=lf
+*.sql  text eol=lf
+*.yml  text eol=lf
+*.yaml text eol=lf
+*.md   text eol=lf

@@ -1,18 +1,34 @@
+# Production stack. Standalone file, not an override of docker-compose.yml
+# (compose's list-merge semantics for `ports:` are easy to get wrong across
+# versions — a full second file removes the ambiguity entirely). Run with:
+#
+#   docker compose -f docker-compose.prod.yml up -d
+#
+# Differences from docker-compose.yml:
+#   - db, gotrue, iam-server publish no host ports at all — caddy is the
+#     only public entry point, on the internal compose network.
+#   - caddy terminates TLS (automatic via Let's Encrypt) for two
+#     subdomains: $AUTH_DOMAIN (-> gotrue) and $IAM_DOMAIN (-> iam-server).
+#     Two subdomains, not one path-split domain, because the browser must
+#     be able to reach GoTrue's /authorize and its own OAuth-provider
+#     callback directly at a public URL — see Caddyfile.
+#   - GOTRUE_MAILER_AUTOCONFIRM is off; GOTRUE_SMTP_* is required.
+#
+# Single iam-server instance only — its OAuth login state is kept
+# in-process (memstore), so `--scale iam-server=N` for N>1 will randomly
+# fail logins whose /callback lands on a different replica than /login
+# did. See README "Going to production" for the full checklist this pairs
+# with, and the note there if this ever needs to scale out.
 services:
-  # One Postgres instance shared by GoTrue and IAM — GoTrue's tables live
-  # in the `auth` schema, IAM's in `iam`, each owned by its own
-  # least-privilege role (see scripts/db-init.sh). Same shape upstream
-  # Supabase itself uses (auth/public/storage/... schemas in one
-  # database), not two separate database servers.
+  # One Postgres instance shared by GoTrue and IAM — see docker-compose.yml
+  # and scripts/db-init.sh for why this isn't two separate database servers.
   db:
-    image: postgres:15.19 # pinned exact patch — see gotrue below for why floating tags are avoided
+    image: postgres:15.19
     restart: unless-stopped
     environment:
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
       POSTGRES_DB: ${POSTGRES_DB:-postgres}
-    ports:
-      - "127.0.0.1:5432:5432" # loopback-only — never meant to be reachable off this host, dev or prod
     volumes:
       - db-data:/var/lib/postgresql/data
     healthcheck:
@@ -21,10 +37,6 @@ services:
       timeout: 5s
       retries: 20
 
-  # Creates both GoTrue's and IAM's roles/schemas and sets each one's
-  # search_path before either service's first connection. Must happen
-  # here, not via a post-startup ALTER ROLE — that breaks GoTrue's
-  # migration runner on restart (see scripts/db-init.sh).
   db-init:
     image: postgres:15.19
     depends_on:
@@ -43,13 +55,11 @@ services:
     restart: "no"
 
   gotrue:
-    image: supabase/gotrue:v2.195.0 # exact tag — images are only tested together as a set per-release; don't drift individual services
+    image: supabase/gotrue:v2.195.0
     depends_on:
       db-init:
         condition: service_completed_successfully
     restart: unless-stopped
-    ports:
-      - "127.0.0.1:9999:9999" # loopback-only, see db above
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://localhost:9999/health"]
       interval: 5s
@@ -59,12 +69,12 @@ services:
     environment:
       GOTRUE_API_HOST: 0.0.0.0
       GOTRUE_API_PORT: 9999
-      API_EXTERNAL_URL: http://localhost:9999
+      API_EXTERNAL_URL: https://${AUTH_DOMAIN}
 
       GOTRUE_DB_DRIVER: postgres
       GOTRUE_DB_DATABASE_URL: postgres://${AUTH_DB_USER}:${AUTH_DB_PASSWORD}@db:5432/${POSTGRES_DB:-postgres}?sslmode=disable
-      GOTRUE_SITE_URL: http://localhost:3000
-      GOTRUE_URI_ALLOW_LIST: "http://localhost:3000/*,http://localhost:8080/*" # 8080 = IAM's own /callback
+      GOTRUE_SITE_URL: ${SITE_URL}
+      GOTRUE_URI_ALLOW_LIST: ${GOTRUE_URI_ALLOW_LIST}
 
       GOTRUE_JWT_SECRET: ${GOTRUE_JWT_SECRET}
       GOTRUE_JWT_EXP: 3600
@@ -72,23 +82,21 @@ services:
 
       GOTRUE_DISABLE_SIGNUP: "false"
       GOTRUE_EXTERNAL_EMAIL_ENABLED: "true"
-      # dev only — production needs GOTRUE_MAILER_AUTOCONFIRM=false plus a
-      # real SMTP server (GOTRUE_SMTP_*, see docker-compose.prod.yml) or
-      # confirmation/reset email has nowhere to go.
-      GOTRUE_MAILER_AUTOCONFIRM: "true"
+      GOTRUE_MAILER_AUTOCONFIRM: "false"
+      GOTRUE_SMTP_ADMIN_EMAIL: ${GOTRUE_SMTP_ADMIN_EMAIL}
+      GOTRUE_SMTP_HOST: ${GOTRUE_SMTP_HOST}
+      GOTRUE_SMTP_PORT: ${GOTRUE_SMTP_PORT}
+      GOTRUE_SMTP_USER: ${GOTRUE_SMTP_USER}
+      GOTRUE_SMTP_PASS: ${GOTRUE_SMTP_PASS}
 
-      # Neither GoTrue's own limits nor an app-level limiter existed here
-      # before — see internal/adapters/inbound/httpapi's rateLimit for the
-      # IAM-side half of this.
       GOTRUE_RATE_LIMIT_EMAIL_SENT: ${GOTRUE_RATE_LIMIT_EMAIL_SENT:-30}
       GOTRUE_PASSWORD_MIN_LENGTH: ${GOTRUE_PASSWORD_MIN_LENGTH:-8}
 
       GOTRUE_EXTERNAL_GOOGLE_ENABLED: "true"
       GOTRUE_EXTERNAL_GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID}
       GOTRUE_EXTERNAL_GOOGLE_SECRET: ${GOOGLE_CLIENT_SECRET}
-      GOTRUE_EXTERNAL_GOOGLE_REDIRECT_URI: http://localhost:9999/callback # dev only — turn off in prod
+      GOTRUE_EXTERNAL_GOOGLE_REDIRECT_URI: https://${AUTH_DOMAIN}/callback
 
-  # --- The IAM service itself ---
   iam-server:
     build: .
     restart: unless-stopped
@@ -97,17 +105,12 @@ services:
         condition: service_completed_successfully
       gotrue:
         condition: service_healthy
-    ports:
-      - "127.0.0.1:8080:8080"
     environment:
-      IAM_ENV: ${IAM_ENV:-development}
+      IAM_ENV: production
       IAM_PORT: 8080
-      # Internal Docker-network addresses — different from the
-      # localhost:9999 / localhost:5432 values in .env, which are for
-      # running `go run ./cmd/server` on the host instead of in compose.
-      SUPABASE_URL: http://gotrue:9999
+      SUPABASE_URL: https://${AUTH_DOMAIN} # public URL — the browser must reach GoTrue here too, see Caddyfile
       SUPABASE_ANON_KEY: ${SUPABASE_ANON_KEY}
-      IAM_CALLBACK_URL: ${IAM_CALLBACK_URL}
+      IAM_CALLBACK_URL: https://${IAM_DOMAIN}/callback
       DATABASE_URL: postgresql://${IAM_DB_USER:-iam}:${IAM_DB_PASSWORD}@db:5432/${POSTGRES_DB:-postgres}?sslmode=disable
       JWT_ISSUER: ${JWT_ISSUER}
       JWT_KEY_ID: ${JWT_KEY_ID}
@@ -117,5 +120,24 @@ services:
       IAM_RATE_LIMIT_RPS: ${IAM_RATE_LIMIT_RPS:-1}
       IAM_RATE_LIMIT_BURST: ${IAM_RATE_LIMIT_BURST:-5}
 
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      AUTH_DOMAIN: ${AUTH_DOMAIN}
+      IAM_DOMAIN: ${IAM_DOMAIN}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    depends_on:
+      - iam-server
+      - gotrue
+
 volumes:
   db-data:
+  caddy-data:
+  caddy-config:

@@ -1,0 +1,13 @@
+# Two subdomains, not one path-split domain: the browser has to reach
+# GoTrue directly at a public URL for /authorize and its own
+# OAuth-provider callback (see docker-compose.prod.yml comment), so
+# splitting by host keeps that a plain 1:1 reverse proxy with no path
+# rewriting. Caddy issues and renews TLS certs for both automatically.
+
+{$AUTH_DOMAIN} {
+	reverse_proxy gotrue:9999
+}
+
+{$IAM_DOMAIN} {
+	reverse_proxy iam-server:8080
+}

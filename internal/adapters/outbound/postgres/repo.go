@@ -1,6 +1,6 @@
 // Package postgres is the durable IdentityRepository adapter (architecture
-// plan §13), replacing the dev-only memoryrepo. Schema in schema.sql must
-// be applied to the target database before use.
+// plan §13), replacing the dev-only memoryrepo. Schema is applied
+// automatically at startup via Migrate() (see migrate.go) — no manual step.
 package postgres
 
 import (

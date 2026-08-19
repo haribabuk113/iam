@@ -12,19 +12,29 @@ import (
 	"github.com/haribabuk113/iam/internal/domain/provider"
 )
 
+// Single-use TTLs for the two hops of the OAuth flow: loginStateTTL covers
+// however long the user takes at the provider's consent screen;
+// exchangeCodeTTL only needs to cover the browser's own redirect, so it's
+// kept short — the code is single-use and this bounds the window it's
+// valid for if it ever leaks (referrer, browser history, proxy logs).
+const (
+	loginStateTTL   = 5 * time.Minute
+	exchangeCodeTTL = 30 * time.Second
+)
+
 // AuthHandler exposes the login/callback/token-exchange endpoints (PRD
 // §14, architecture plan §9). It owns only transport concerns — PKCE
 // generation, state correlation, redirect validation — and delegates all
 // identity resolution to auth.Service.
 type AuthHandler struct {
 	svc             *auth.Service
-	states          *StateStore
-	exchanges       *ExchangeStore
+	states          outbound.LoginStateStore
+	exchanges       outbound.ExchangeCodeStore
 	redirectOrigins map[string][]string // app_id -> allowed return_to origins
 	log             outbound.Logger
 }
 
-func NewAuthHandler(svc *auth.Service, states *StateStore, exchanges *ExchangeStore, redirectOrigins map[string][]string, log outbound.Logger) *AuthHandler {
+func NewAuthHandler(svc *auth.Service, states outbound.LoginStateStore, exchanges outbound.ExchangeCodeStore, redirectOrigins map[string][]string, log outbound.Logger) *AuthHandler {
 	return &AuthHandler{svc: svc, states: states, exchanges: exchanges, redirectOrigins: redirectOrigins, log: log}
 }
 
@@ -61,12 +71,16 @@ func (h *AuthHandler) Login(c *gin.Context) {
 		return
 	}
 
-	h.states.Put(state, loginState{
+	if err := h.states.Put(c.Request.Context(), state, outbound.LoginState{
 		CodeVerifier: verifier,
 		Provider:     p,
 		ReturnTo:     returnTo,
 		AppID:        appID,
-	})
+	}, loginStateTTL); err != nil {
+		h.log.Error("store login state failed", "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal_error"})
+		return
+	}
 
 	c.Redirect(http.StatusFound, authURL)
 }
@@ -76,7 +90,12 @@ func (h *AuthHandler) Callback(c *gin.Context) {
 	code := c.Query("code")
 	state := c.Query("iam_state")
 
-	st, ok := h.states.Take(state)
+	st, ok, err := h.states.Take(c.Request.Context(), state)
+	if err != nil {
+		h.log.Error("load login state failed", "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal_error"})
+		return
+	}
 	if !ok || code == "" {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid_or_expired_state"})
 		return
@@ -93,13 +112,21 @@ func (h *AuthHandler) Callback(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal_error"})
 		return
 	}
-	h.exchanges.Put(exchangeCode, string(id.ID))
+	// Bound to st.AppID: /token later checks the redeemer names the same
+	// app_id, so a code intercepted via a different app's redirect can't
+	// be redeemed against this one — see auth_handler.go Token().
+	if err := h.exchanges.Put(c.Request.Context(), exchangeCode, string(id.ID), st.AppID, exchangeCodeTTL); err != nil {
+		h.log.Error("store exchange code failed", "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal_error"})
+		return
+	}
 
 	c.Redirect(http.StatusFound, st.ReturnTo+"?code="+exchangeCode)
 }
 
 type tokenRequest struct {
-	Code string `json:"code"`
+	Code  string `json:"code"`
+	AppID string `json:"app_id"`
 }
 
 type tokenResponse struct {
@@ -109,18 +136,26 @@ type tokenResponse struct {
 }
 
 // Token exchanges the opaque code handed to the application's redirect
-// for the IAM's own JWT: POST /token {"code": "..."}. The application's
-// backend calls this server-to-server — the code alone was never a
-// bearer credential (architecture plan §9).
+// for the IAM's own JWT: POST /token {"code": "...", "app_id": "..."}.
+// The application's backend calls this server-to-server — the code alone
+// was never a bearer credential (architecture plan §9). app_id must match
+// the app the code was issued to at /callback; this is what stops a code
+// captured off one app's redirect (e.g. via a leaked Referer) from being
+// redeemed by a different app's backend.
 func (h *AuthHandler) Token(c *gin.Context) {
 	var req tokenRequest
-	if err := c.ShouldBindJSON(&req); err != nil || req.Code == "" {
+	if err := c.ShouldBindJSON(&req); err != nil || req.Code == "" || req.AppID == "" {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid_request"})
 		return
 	}
 
-	ecosystemID, ok := h.exchanges.Take(req.Code)
-	if !ok {
+	ecosystemID, appID, ok, err := h.exchanges.Take(c.Request.Context(), req.Code)
+	if err != nil {
+		h.log.Error("load exchange code failed", "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal_error"})
+		return
+	}
+	if !ok || appID != req.AppID {
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid_or_expired_code"})
 		return
 	}
